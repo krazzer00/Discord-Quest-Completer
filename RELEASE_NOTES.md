@@ -1,5 +1,7 @@
 ## What's new
 
+- **Fix:** QR code login failed with "Login timed out" before the QR appeared, because the remote-auth handshake used the wrong reply field (`nonce` instead of `proof`). Scanning to log in now works.
+
 - **QR code login:** sign in by scanning a QR code with the Discord mobile app (Discord's official remote-auth flow), instead of finding and pasting your token. Pasting a token still works.
 
 - **ACTIVE QUESTS tab:** paste your Discord token once and the app loads your current quests with their progress.

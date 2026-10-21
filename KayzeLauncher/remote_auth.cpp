@@ -425,7 +425,7 @@ void RemoteAuthSession::Run() {
             Bytes nonce = key.Decrypt(enc);
             if (nonce.empty()) { SetError("Handshake failed."); break; }
             std::string proof = ToBase64Url(Base64Encode(Sha256(nonce)));
-            json reply = { {"op", "nonce_proof"}, {"nonce", proof} };
+            json reply = { {"op", "nonce_proof"}, {"proof", proof} };
             ws.SendText(reply.dump());
         } else if (op == "pending_remote_init") {
             std::string fp = data.value("fingerprint", "");
@@ -478,7 +478,11 @@ void RemoteAuthSession::Run() {
         }
         SetStatus(Success);
     } else if (m_status.load() != Canceled) {
-        if (GetError().empty()) SetError(m_stop.load() ? "Canceled." : "Login timed out.");
+        if (GetError().empty()) {
+            if (m_stop.load()) SetError("Canceled.");
+            else if (m_status.load() == Connecting) SetError("Discord closed the connection during sign-in. Try again.");
+            else SetError("Login timed out.");
+        }
         SetStatus(m_stop.load() ? Canceled : Failed);
     }
 }
