@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <direct.h>
 #include <sstream>
+#include <deque>
 #include <ctime>
 #include <iterator>
 #include <wincrypt.h>
@@ -38,6 +39,7 @@ const char* DB_URL = "https://cdn.discordapp.com/detectables/games.json";
 const char* DB_FILENAME = "games_cache.temp";
 const char* CONFIG_FILENAME = "kayze.config";
 const char* QUESTS_URL = "https://discord.com/api/v9/quests/@me";
+const char* APPS_URL = "https://discord.com/api/v9/applications/public?application_ids=";
 const char* TOKEN_FILENAME = "discord_token.dat";
 
 const std::string CURRENT_VERSION = "1.0.5";
@@ -160,11 +162,47 @@ struct GameInfo {
     std::string id;
     std::vector<std::string> executables;
     std::vector<std::string> executablePaths;
+    bool guessedExe = false;
 };
 
 std::string ToLower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
     return s;
+}
+
+void AddWin32Executables(GameInfo& game, const json& executables) {
+    if (!executables.is_array()) return;
+    for (auto& exeEntry : executables) {
+        if (!exeEntry.is_object() || !exeEntry.contains("os") || !exeEntry["os"].is_string() || exeEntry["os"] != "win32") continue;
+        if (!exeEntry.contains("name") || !exeEntry["name"].is_string()) continue;
+        std::string exePath = exeEntry["name"].get<std::string>();
+        if (exePath.empty()) continue;
+
+        std::string exeName = exePath;
+        size_t lastSlash = exeName.find_last_of("/\\");
+        if (lastSlash != std::string::npos) exeName = exeName.substr(lastSlash + 1);
+
+        bool exists = false;
+        for (size_t i = 0; i < game.executables.size(); ++i) {
+            if (game.executables[i] == exeName && game.executablePaths[i] == exePath) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            game.executables.push_back(exeName);
+            game.executablePaths.push_back(exePath);
+        }
+    }
+}
+
+// "Some Game: Remastered" -> "SomeGameRemastered", used when Discord gives no executable for a quest game.
+std::string SanitizeExeName(const std::string& name) {
+    std::string out;
+    for (unsigned char c : name) {
+        if (isalnum(c) || c == '-' || c == '_' || c == '.') out += (char)c;
+    }
+    return out.empty() ? "Game" : out;
 }
 
 std::vector<GameInfo> FetchGameDatabase() {
@@ -186,29 +224,7 @@ std::vector<GameInfo> FetchGameDatabase() {
                     else if (item["id"].is_number()) game.id = std::to_string(item["id"].get<long long>());
                     else game.id = "0";
 
-                    if (item.contains("executables") && item["executables"].is_array()) {
-                        for (auto& exeEntry : item["executables"]) {
-                            if (exeEntry.value("os", "unknown") != "win32") continue;
-                            std::string exePath = exeEntry.value("name", "");
-                            if (exePath.empty()) continue;
-
-                            std::string exeName = exePath;
-                            size_t lastSlash = exeName.find_last_of("/\\");
-                            if (lastSlash != std::string::npos) exeName = exeName.substr(lastSlash + 1);
-
-                            bool exists = false;
-                            for (size_t i = 0; i < game.executables.size(); ++i) {
-                                if (game.executables[i] == exeName && game.executablePaths[i] == exePath) {
-                                    exists = true;
-                                    break;
-                                }
-                            }
-                            if (!exists) {
-                                game.executables.push_back(exeName);
-                                game.executablePaths.push_back(exePath);
-                            }
-                        }
-                    }
+                    if (item.contains("executables")) AddWin32Executables(game, item["executables"]);
                     if (!game.executables.empty()) db.push_back(game);
                 }
             }
@@ -229,7 +245,8 @@ struct QuestInfo {
     int targetSeconds = 0;
     int progressSeconds = 0;
     bool enrolled = false;
-    int gameIndex = -1;
+    bool guessedExe = false;
+    GameInfo* game = nullptr;
 };
 
 std::string JsonStr(const json& obj, const char* key) {
@@ -328,8 +345,53 @@ std::string QuestTaskLabel(const std::string& taskType) {
     return taskType.empty() ? "Unknown task" : taskType;
 }
 
+// Finds the game of a quest that isn't in the detectables db: asks Discord for the application's executables,
+// and if Discord knows none, falls back to "<Game Name>.exe". Results live in extraGames so pointers stay valid.
+GameInfo* ResolveUnknownGame(const QuestInfo& quest, const std::string& token, std::deque<GameInfo>& extraGames, bool& guessed) {
+    guessed = false;
+    for (auto& g : extraGames) {
+        if ((!quest.applicationId.empty() && g.id == quest.applicationId) || ToLower(g.name) == ToLower(quest.gameName)) {
+            guessed = g.guessedExe;
+            return &g;
+        }
+    }
+
+    GameInfo game;
+    game.name = quest.gameName;
+    game.id = quest.applicationId.empty() ? "0" : quest.applicationId;
+
+    if (!quest.applicationId.empty()) {
+        DWORD status = 0;
+        std::string body = DiscordApiGet((std::string(APPS_URL) + quest.applicationId).c_str(), token, status);
+        if (status == 200) {
+            try {
+                json apps = json::parse(body);
+                if (apps.is_object()) apps = json::array({ apps });
+                for (auto& app : apps) {
+                    if (JsonStr(app, "id") != quest.applicationId) continue;
+                    if (app.contains("executables")) AddWin32Executables(game, app["executables"]);
+                    std::string appName = JsonStr(app, "name");
+                    if (!appName.empty()) game.name = appName;
+                }
+            }
+            catch (...) {}
+        }
+    }
+
+    if (game.executables.empty()) {
+        std::string exe = SanitizeExeName(game.name) + ".exe";
+        game.executables.push_back(exe);
+        game.executablePaths.push_back(exe);
+        game.guessedExe = true;
+        guessed = true;
+    }
+
+    extraGames.push_back(game);
+    return &extraGames.back();
+}
+
 // Returns the active (not expired, not completed) quests of the account and links each one to its game in the detectables db.
-std::vector<QuestInfo> FetchActiveQuests(const std::string& token, const std::vector<GameInfo>& db, std::string& error) {
+std::vector<QuestInfo> FetchActiveQuests(const std::string& token, std::vector<GameInfo>& db, std::deque<GameInfo>& extraGames, std::string& error) {
     std::vector<QuestInfo> quests;
     error.clear();
 
@@ -397,15 +459,16 @@ std::vector<QuestInfo> FetchActiveQuests(const std::string& token, const std::ve
                 }
             }
 
-            for (size_t i = 0; i < db.size(); ++i) {
-                if (!quest.applicationId.empty() && db[i].id == quest.applicationId) { quest.gameIndex = (int)i; break; }
+            for (auto& g : db) {
+                if (!quest.applicationId.empty() && g.id == quest.applicationId) { quest.game = &g; break; }
             }
-            if (quest.gameIndex < 0) {
+            if (!quest.game) {
                 std::string wanted = ToLower(quest.gameName);
-                for (size_t i = 0; i < db.size(); ++i) {
-                    if (ToLower(db[i].name) == wanted) { quest.gameIndex = (int)i; break; }
+                for (auto& g : db) {
+                    if (ToLower(g.name) == wanted && !g.executables.empty()) { quest.game = &g; break; }
                 }
             }
+            if (!quest.game && IsDesktopQuest(quest)) quest.game = ResolveUnknownGame(quest, token, extraGames, quest.guessedExe);
 
             quests.push_back(quest);
         }
@@ -413,8 +476,8 @@ std::vector<QuestInfo> FetchActiveQuests(const std::string& token, const std::ve
     catch (...) { error = "Can't parse Discord quests response."; }
 
     std::stable_sort(quests.begin(), quests.end(), [](const QuestInfo& a, const QuestInfo& b) {
-        bool aLaunchable = IsDesktopQuest(a) && a.gameIndex >= 0;
-        bool bLaunchable = IsDesktopQuest(b) && b.gameIndex >= 0;
+        bool aLaunchable = IsDesktopQuest(a) && a.game != nullptr;
+        bool bLaunchable = IsDesktopQuest(b) && b.game != nullptr;
         return aLaunchable && !bLaunchable;
     });
     return quests;
@@ -672,8 +735,9 @@ int main(int argc, char** argv) {
     std::string discordToken = LoadDiscordToken();
     std::string questError;
     std::vector<QuestInfo> quests;
+    std::deque<GameInfo> questOnlyGames;
     bool showTokenInput = discordToken.empty();
-    if (!discordToken.empty()) quests = FetchActiveQuests(discordToken, db, questError);
+    if (!discordToken.empty()) quests = FetchActiveQuests(discordToken, db, questOnlyGames, questError);
     bool done = false;
 
     while (!done) {
@@ -750,7 +814,7 @@ int main(int argc, char** argv) {
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.15f));
                 ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.25f));
                 ImGui::BeginDisabled(discordToken.empty());
-                if (ImGui::Button("REFRESH", ImVec2(smallW, 0))) quests = FetchActiveQuests(discordToken, db, questError);
+                if (ImGui::Button("REFRESH", ImVec2(smallW, 0))) quests = FetchActiveQuests(discordToken, db, questOnlyGames, questError);
                 ImGui::EndDisabled();
                 ImGui::SameLine();
                 if (ImGui::Button("TOKEN", ImVec2(smallW, 0))) showTokenInput = !showTokenInput;
@@ -773,7 +837,7 @@ int main(int argc, char** argv) {
                     if (ImGui::Button("LOAD", ImVec2(loadW, ImGui::GetFrameHeight()))) {
                         std::string newToken = TrimToken(tokenBuf);
                         if (!newToken.empty()) {
-                            quests = FetchActiveQuests(newToken, db, questError);
+                            quests = FetchActiveQuests(newToken, db, questOnlyGames, questError);
                             if (questError.empty()) {
                                 discordToken = newToken;
                                 SaveDiscordToken(discordToken);
@@ -797,7 +861,7 @@ int main(int argc, char** argv) {
                 else {
                     for (auto& quest : quests) {
                         const float rowH = 62.0f;
-                        GameInfo* questGame = quest.gameIndex >= 0 ? &db[quest.gameIndex] : nullptr;
+                        GameInfo* questGame = quest.game;
                         bool launchable = questGame != nullptr && !questGame->executables.empty() && IsDesktopQuest(quest);
 
                         ImGui::BeginChild(("quest_" + quest.id).c_str(), ImVec2(0, rowH), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
@@ -810,7 +874,8 @@ int main(int argc, char** argv) {
                         std::string details = QuestTaskLabel(quest.taskType);
                         if (quest.targetSeconds > 0) details += "  " + std::to_string(quest.progressSeconds / 60) + "/" + std::to_string(quest.targetSeconds / 60) + " min";
                         if (!quest.enrolled) details += "  (not accepted yet)";
-                        else if (questGame == nullptr) details += "  (game not detectable)";
+                        else if (questGame == nullptr && IsDesktopQuest(quest)) details += "  (game not found)";
+                        else if (quest.guessedExe) details += "  (exe guessed)";
                         ImGui::SetCursorPos(ImVec2(15.0f, 33.0f));
                         ImGui::PushFont(fontRegular); ImGui::TextColored(colTextGrey, "%s", FitText(details, textMaxW).c_str()); ImGui::PopFont();
 

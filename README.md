@@ -23,7 +23,7 @@ It uses an advanced **"Clean Launch"** technology to simulate game execution, tr
 ## ✨ Features
 
 * **🚀 No Downloads Required:** Complete quests for games like *Genshin Impact*, *Fortnite*, or *Call of Duty* without installing 100GB of data.
-* **📋 Active Quests Auto-Load:** Paste your Discord token once and the app loads your current quests, resolves the game of each quest (via Discord's detectable games list) and lets you start it with one click. The token is stored encrypted with Windows DPAPI in `%APPDATA%\KayzeLauncher` and is sent only to `discord.com`.
+* **📋 Active Quests Auto-Load:** Paste your Discord token once and the app loads your current quests, resolves the game of each quest (via Discord's detectable games list; games missing from it are looked up through Discord's application API, and as a last resort the executable name is guessed from the game title) and lets you start it with one click. The token is stored encrypted with Windows DPAPI in `%APPDATA%\KayzeLauncher` and is sent only to `discord.com`.
 * **☁️ Cloud Database:** The game list is fetched directly from the **GitHub Repository** at startup. No app updates needed for new games!
 * **🛡️ Clean Launch Technology (v1.0.3+):** Unlike other tools, KAYZE runs games in isolated folders (`fake_games/`) with real configuration files. This ensures **100% detection rate** by Discord.
 * **🧹 Auto-Cleanup:** The app automatically cleans up temporary executables and config files when you stop the game.
