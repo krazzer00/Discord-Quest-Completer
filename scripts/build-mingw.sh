@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Cross-compiles KayzeLauncher.exe with mingw-w64 (used by the release workflow).
 set -euo pipefail
-cd "$(dirname "$0")/../KayzeLauncher"
-OUT_DIR="${1:-../build}"
+# Resolve the output dir against the caller's cwd before changing directory.
+OUT_DIR="${1:-$(dirname "$0")/../build}"
 mkdir -p "$OUT_DIR"
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
+cd "$(dirname "$0")/../KayzeLauncher"
 
 # Resource.rc is saved by Visual Studio as UTF-16, windres wants UTF-8.
 iconv -f UTF-16LE -t UTF-8 Resource.rc | sed '1s/^\xEF\xBB\xBF//' > "$OUT_DIR/Resource.utf8.rc"
