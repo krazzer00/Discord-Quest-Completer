@@ -45,6 +45,12 @@
     <ClInclude Include="font_data.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="qrcodegen.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="remote_auth.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="imgui.cpp">
@@ -63,6 +69,12 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="main.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="remote_auth.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="qrcodegen.c">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="imgui_impl_dx11.cpp">

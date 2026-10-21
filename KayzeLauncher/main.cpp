@@ -23,6 +23,8 @@
 
 #include "font_data.h"
 #include "json.hpp"
+#include "qrcodegen.h"
+#include "remote_auth.h"
 using json = nlohmann::json;
 
 #pragma comment(lib, "d3d11.lib")
@@ -42,7 +44,7 @@ const char* QUESTS_URL = "https://discord.com/api/v9/quests/@me";
 const char* APPS_URL = "https://discord.com/api/v9/applications/public?application_ids=";
 const char* TOKEN_FILENAME = "discord_token.dat";
 
-const std::string CURRENT_VERSION = "1.1.0";
+const std::string CURRENT_VERSION = "1.2.0";
 
 std::string GetGitHubAPIResponse(const char* url) {
     HINTERNET hInternet = InternetOpenA("KayzeLauncher_Updater/1.0", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
@@ -667,6 +669,43 @@ void CreateRenderTarget();
 void CleanupRenderTarget();
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
+// Renders a single horizontally-centered line of grey text.
+void TextCenteredLine(const std::string& text) {
+    float avail = ImGui::GetContentRegionAvail().x;
+    float tw = ImGui::CalcTextSize(text.c_str()).x;
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (avail - tw) * 0.5f);
+    ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 0.75f), "%s", text.c_str());
+}
+
+// Encodes text as a QR code and draws it centered, on a white quiet-zone background.
+void DrawQrCentered(const std::string& text, float sizePx) {
+    static uint8_t qr[qrcodegen_BUFFER_LEN_MAX];
+    static uint8_t tmp[qrcodegen_BUFFER_LEN_MAX];
+    if (text.empty() || !qrcodegen_encodeText(text.c_str(), tmp, qr, qrcodegen_Ecc_MEDIUM,
+            qrcodegen_VERSION_MIN, qrcodegen_VERSION_MAX, qrcodegen_Mask_AUTO, true)) {
+        return;
+    }
+    int count = qrcodegen_getSize(qr);
+    const int quiet = 2;
+    float module = sizePx / (float)(count + quiet * 2);
+    float total = module * (count + quiet * 2);
+    ImVec2 origin = ImGui::GetCursorScreenPos();
+    float startX = origin.x + (ImGui::GetContentRegionAvail().x - total) * 0.5f;
+    float startY = origin.y;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(ImVec2(startX, startY), ImVec2(startX + total, startY + total), IM_COL32(255, 255, 255, 255));
+    for (int y = 0; y < count; ++y) {
+        for (int x = 0; x < count; ++x) {
+            if (qrcodegen_getModule(qr, x, y)) {
+                float px = startX + (x + quiet) * module;
+                float py = startY + (y + quiet) * module;
+                dl->AddRectFilled(ImVec2(px, py), ImVec2(px + module, py + module), IM_COL32(0, 0, 0, 255));
+            }
+        }
+    }
+    ImGui::Dummy(ImVec2(total, total));
+}
+
 int main(int argc, char** argv) {
     atexit(CleanupTempFiles);
 
@@ -823,38 +862,91 @@ int main(int argc, char** argv) {
                 float questBoxHeight = tabContentHeight - (ImGui::GetCursorPosY() - tabStartY);
                 ImGui::BeginChild("QuestsBox", ImVec2(0, questBoxHeight), true);
                 if (showTokenInput || discordToken.empty()) {
-                    ImGui::PushFont(fontRegular);
-                    ImGui::PushStyleColor(ImGuiCol_Text, colTextGrey);
-                    ImGui::TextWrapped("Paste your Discord token to load your active quests automatically. It is stored encrypted (Windows DPAPI) on this PC and is sent only to discord.com. Never share it with anyone.");
-                    ImGui::PopStyleColor();
-                    float loadW = 90.0f;
-                    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - loadW - style.ItemSpacing.x);
-                    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10, 8));
-                    ImGui::InputTextWithHint("##token", "Discord token...", tokenBuf, IM_ARRAYSIZE(tokenBuf), ImGuiInputTextFlags_Password);
-                    ImGui::PopStyleVar(); ImGui::PopItemWidth(); ImGui::PopFont();
-                    ImGui::SameLine();
-                    ImGui::PushFont(fontBold);
-                    if (ImGui::Button("LOAD", ImVec2(loadW, ImGui::GetFrameHeight()))) {
-                        std::string newToken = TrimToken(tokenBuf);
-                        if (!newToken.empty()) {
-                            quests = FetchActiveQuests(newToken, db, questOnlyGames, questError);
-                            if (questError.empty()) {
-                                discordToken = newToken;
-                                SaveDiscordToken(discordToken);
-                                showTokenInput = false;
-                            }
+                    static RemoteAuthSession qrAuth;
+                    int qrStatus = qrAuth.GetStatus();
+
+                    // Pick up a completed QR login.
+                    if (qrStatus == RemoteAuthSession::Success) {
+                        std::string tok = qrAuth.TakeToken();
+                        if (!tok.empty()) {
+                            discordToken = tok;
+                            SaveDiscordToken(discordToken);
+                            quests = FetchActiveQuests(discordToken, db, questOnlyGames, questError);
+                            showTokenInput = false;
                         }
-                        SecureZeroMemory(tokenBuf, sizeof(tokenBuf));
                     }
-                    if (!discordToken.empty()) {
+
+                    bool qrActive = qrStatus == RemoteAuthSession::Connecting ||
+                                    qrStatus == RemoteAuthSession::WaitingForScan ||
+                                    qrStatus == RemoteAuthSession::Scanned;
+
+                    if (qrActive) {
+                        ImGui::PushFont(fontRegular);
+                        if (qrStatus == RemoteAuthSession::WaitingForScan) {
+                            TextCenteredLine("Open Discord on your phone and scan:");
+                            ImGui::Spacing();
+                            DrawQrCentered(qrAuth.GetQrUrl(), 150.0f);
+                        }
+                        else if (qrStatus == RemoteAuthSession::Scanned) {
+                            ImGui::Spacing();
+                            TextCenteredLine("Logging in as " + qrAuth.GetUserDisplay());
+                            TextCenteredLine("Confirm on your phone...");
+                        }
+                        else {
+                            ImGui::Spacing();
+                            TextCenteredLine("Connecting to Discord...");
+                        }
+                        ImGui::PopFont();
+                        ImGui::Spacing();
+                        ImGui::PushFont(fontBold);
                         ImGui::PushStyleColor(ImGuiCol_Button, colBtnStop);
-                        if (ImGui::Button("FORGET SAVED TOKEN", ImVec2(ImGui::GetContentRegionAvail().x, 0))) {
-                            ForgetDiscordToken(); discordToken.clear(); quests.clear(); questError.clear();
-                        }
-                        ImGui::PopStyleColor();
+                        if (ImGui::Button("CANCEL", ImVec2(ImGui::GetContentRegionAvail().x, 0))) qrAuth.Cancel();
+                        ImGui::PopStyleColor(); ImGui::PopFont();
                     }
-                    ImGui::PopFont();
-                    if (!questError.empty()) ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", questError.c_str());
+                    else {
+                        ImGui::PushFont(fontBold);
+                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.06f, 0.72f, 0.83f, 0.5f));
+                        if (ImGui::Button("LOG IN WITH QR CODE", ImVec2(ImGui::GetContentRegionAvail().x, 34))) {
+                            questError.clear();
+                            qrAuth.Start();
+                        }
+                        ImGui::PopStyleColor(); ImGui::PopFont();
+
+                        ImGui::PushFont(fontRegular);
+                        ImGui::PushStyleColor(ImGuiCol_Text, colTextGrey);
+                        ImGui::TextWrapped("Scan a QR code with the Discord mobile app, or paste your token below. It is stored encrypted (Windows DPAPI) on this PC and is sent only to discord.com. Never share it with anyone.");
+                        ImGui::PopStyleColor();
+                        float loadW = 90.0f;
+                        ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - loadW - style.ItemSpacing.x);
+                        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10, 8));
+                        ImGui::InputTextWithHint("##token", "Discord token...", tokenBuf, IM_ARRAYSIZE(tokenBuf), ImGuiInputTextFlags_Password);
+                        ImGui::PopStyleVar(); ImGui::PopItemWidth(); ImGui::PopFont();
+                        ImGui::SameLine();
+                        ImGui::PushFont(fontBold);
+                        if (ImGui::Button("LOAD", ImVec2(loadW, ImGui::GetFrameHeight()))) {
+                            std::string newToken = TrimToken(tokenBuf);
+                            if (!newToken.empty()) {
+                                quests = FetchActiveQuests(newToken, db, questOnlyGames, questError);
+                                if (questError.empty()) {
+                                    discordToken = newToken;
+                                    SaveDiscordToken(discordToken);
+                                    showTokenInput = false;
+                                }
+                            }
+                            SecureZeroMemory(tokenBuf, sizeof(tokenBuf));
+                        }
+                        if (!discordToken.empty()) {
+                            ImGui::PushStyleColor(ImGuiCol_Button, colBtnStop);
+                            if (ImGui::Button("FORGET SAVED TOKEN", ImVec2(ImGui::GetContentRegionAvail().x, 0))) {
+                                ForgetDiscordToken(); discordToken.clear(); quests.clear(); questError.clear();
+                            }
+                            ImGui::PopStyleColor();
+                        }
+                        ImGui::PopFont();
+                        std::string qrErr = qrStatus == RemoteAuthSession::Failed ? qrAuth.GetError() : "";
+                        if (!qrErr.empty()) ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", qrErr.c_str());
+                        else if (!questError.empty()) ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", questError.c_str());
+                    }
                 }
                 else if (!questError.empty()) { TextCentered(questError); }
                 else if (quests.empty()) { TextCentered("No active quests right now."); }

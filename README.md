@@ -23,7 +23,8 @@ It uses an advanced **"Clean Launch"** technology to simulate game execution, tr
 ## ✨ Features
 
 * **🚀 No Downloads Required:** Complete quests for games like *Genshin Impact*, *Fortnite*, or *Call of Duty* without installing 100GB of data.
-* **📋 Active Quests Auto-Load:** Paste your Discord token once and the app loads your current quests, resolves the game of each quest (via Discord's detectable games list; games missing from it are looked up through Discord's application API, and as a last resort the executable name is guessed from the game title) and lets you start it with one click. The token is stored encrypted with Windows DPAPI in `%APPDATA%\KayzeLauncher` and is sent only to `discord.com`.
+* **🔑 QR Code Login:** Sign in by scanning a QR code with the Discord mobile app (Discord's official remote-auth flow) — no need to find your token by hand. Pasting a token still works too.
+* **📋 Active Quests Auto-Load:** Sign in once and the app loads your current quests, resolves the game of each quest (via Discord's detectable games list; games missing from it are looked up through Discord's application API, and as a last resort the executable name is guessed from the game title) and lets you start it with one click. The token is stored encrypted with Windows DPAPI in `%APPDATA%\KayzeLauncher` and is sent only to `discord.com`.
 * **☁️ Cloud Database:** The game list is fetched directly from the **GitHub Repository** at startup. No app updates needed for new games!
 * **🛡️ Clean Launch Technology (v1.0.3+):** Unlike other tools, KAYZE runs games in isolated folders (`fake_games/`) with real configuration files. This ensures **100% detection rate** by Discord.
 * **🧹 Auto-Cleanup:** The app automatically cleans up temporary executables and config files when you stop the game.
@@ -53,7 +54,7 @@ To make Discord count the minutes for the quest, you must follow these exact ste
 
 ### 2. Start KAYZE
 * Open `KayzeLauncher.exe`.
-* **Quests tab:** click **TOKEN**, paste your Discord token and press **LOAD**. Your active quests appear with their progress; press **START** on the quest you want (or **SELECT** to pick a specific executable).
+* **Quests tab:** click **TOKEN**, then either **LOG IN WITH QR CODE** and scan it with the Discord mobile app, or paste your token and press **LOAD**. Your active quests appear with their progress; press **START** on the quest you want (or **SELECT** to pick a specific executable).
 * **Search tab:** alternatively, search for the game name and click **START** next to the correct executable.
 * Video and Activity quests can't be completed by launching a process, so they have no START button. Stream quests need you to stream the started window in a voice channel.
 * *A black window with the game title will open. **DO NOT CLOSE IT** until finished.*
