@@ -44,7 +44,7 @@ const char* QUESTS_URL = "https://discord.com/api/v9/quests/@me";
 const char* APPS_URL = "https://discord.com/api/v9/applications/public?application_ids=";
 const char* TOKEN_FILENAME = "discord_token.dat";
 
-const std::string CURRENT_VERSION = "1.2.0";
+const std::string CURRENT_VERSION = "1.2.1";
 
 std::string GetGitHubAPIResponse(const char* url) {
     HINTERNET hInternet = InternetOpenA("KayzeLauncher_Updater/1.0", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
