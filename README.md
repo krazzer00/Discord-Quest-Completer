@@ -23,6 +23,7 @@ It uses an advanced **"Clean Launch"** technology to simulate game execution, tr
 ## ✨ Features
 
 * **🚀 No Downloads Required:** Complete quests for games like *Genshin Impact*, *Fortnite*, or *Call of Duty* without installing 100GB of data.
+* **📋 Active Quests Auto-Load:** Paste your Discord token once and the app loads your current quests, resolves the game of each quest (via Discord's detectable games list) and lets you start it with one click. The token is stored encrypted with Windows DPAPI in `%APPDATA%\KayzeLauncher` and is sent only to `discord.com`.
 * **☁️ Cloud Database:** The game list is fetched directly from the **GitHub Repository** at startup. No app updates needed for new games!
 * **🛡️ Clean Launch Technology (v1.0.3+):** Unlike other tools, KAYZE runs games in isolated folders (`fake_games/`) with real configuration files. This ensures **100% detection rate** by Discord.
 * **🧹 Auto-Cleanup:** The app automatically cleans up temporary executables and config files when you stop the game.
@@ -52,8 +53,9 @@ To make Discord count the minutes for the quest, you must follow these exact ste
 
 ### 2. Start KAYZE
 * Open `KayzeLauncher.exe`.
-* Search for the game name in the search bar.
-* Click **START** next to the correct executable.
+* **Quests tab:** click **TOKEN**, paste your Discord token and press **LOAD**. Your active quests appear with their progress; press **START** on the quest you want (or **SELECT** to pick a specific executable).
+* **Search tab:** alternatively, search for the game name and click **START** next to the correct executable.
+* Video and Activity quests can't be completed by launching a process, so they have no START button. Stream quests need you to stream the started window in a voice channel.
 * *A black window with the game title will open. **DO NOT CLOSE IT** until finished.*
 
 ### 3. Claim Reward

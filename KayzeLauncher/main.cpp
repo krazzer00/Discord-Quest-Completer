@@ -16,8 +16,11 @@
 #include <cstdlib>
 #include <direct.h>
 #include <sstream>
+#include <ctime>
+#include <iterator>
+#include <wincrypt.h>
 
-#include "font_data.h" 
+#include "font_data.h"
 #include "json.hpp"
 using json = nlohmann::json;
 
@@ -26,6 +29,7 @@ using json = nlohmann::json;
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "urlmon.lib")
 #pragma comment(lib, "wininet.lib")
+#pragma comment(lib, "crypt32.lib")
 
 #define IDI_ICON1 101 
 static bool g_CanDrag = true;
@@ -33,6 +37,8 @@ static bool g_CanDrag = true;
 const char* DB_URL = "https://cdn.discordapp.com/detectables/games.json";
 const char* DB_FILENAME = "games_cache.temp";
 const char* CONFIG_FILENAME = "kayze.config";
+const char* QUESTS_URL = "https://discord.com/api/v9/quests/@me";
+const char* TOKEN_FILENAME = "discord_token.dat";
 
 const std::string CURRENT_VERSION = "1.0.5";
 
@@ -214,6 +220,216 @@ std::vector<GameInfo> FetchGameDatabase() {
     return db;
 }
 
+struct QuestInfo {
+    std::string id;
+    std::string questName;
+    std::string gameName;
+    std::string applicationId;
+    std::string taskType;
+    int targetSeconds = 0;
+    int progressSeconds = 0;
+    bool enrolled = false;
+    int gameIndex = -1;
+};
+
+std::string JsonStr(const json& obj, const char* key) {
+    if (!obj.is_object() || !obj.contains(key)) return "";
+    const json& v = obj[key];
+    if (v.is_string()) return v.get<std::string>();
+    if (v.is_number_integer()) return std::to_string(v.get<long long>());
+    return "";
+}
+
+std::string TrimToken(std::string s) {
+    const std::string junk = " \t\r\n\"'";
+    size_t start = s.find_first_not_of(junk);
+    if (start == std::string::npos) return "";
+    size_t end = s.find_last_not_of(junk);
+    return s.substr(start, end - start + 1);
+}
+
+std::string GetTokenFilePath() {
+    const char* appData = getenv("APPDATA");
+    if (!appData) return TOKEN_FILENAME;
+    std::string dir = std::string(appData) + "\\KayzeLauncher";
+    _mkdir(dir.c_str());
+    return dir + "\\" + TOKEN_FILENAME;
+}
+
+// The token is encrypted with DPAPI, so only the current Windows user can read it back.
+bool SaveDiscordToken(const std::string& token) {
+    DATA_BLOB in, out;
+    in.pbData = (BYTE*)token.data(); in.cbData = (DWORD)token.size();
+    if (!CryptProtectData(&in, L"KAYZE Discord Token", NULL, NULL, NULL, CRYPTPROTECT_UI_FORBIDDEN, &out)) return false;
+    std::ofstream f(GetTokenFilePath(), std::ios::binary);
+    bool ok = f.is_open();
+    if (ok) f.write((const char*)out.pbData, out.cbData);
+    LocalFree(out.pbData);
+    return ok;
+}
+
+std::string LoadDiscordToken() {
+    std::ifstream f(GetTokenFilePath(), std::ios::binary);
+    if (!f.is_open()) return "";
+    std::string blob((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (blob.empty()) return "";
+    DATA_BLOB in, out;
+    in.pbData = (BYTE*)blob.data(); in.cbData = (DWORD)blob.size();
+    if (!CryptUnprotectData(&in, NULL, NULL, NULL, NULL, CRYPTPROTECT_UI_FORBIDDEN, &out)) return "";
+    std::string token((const char*)out.pbData, out.cbData);
+    LocalFree(out.pbData);
+    return token;
+}
+
+void ForgetDiscordToken() {
+    DeleteFileA(GetTokenFilePath().c_str());
+}
+
+std::string DiscordApiGet(const char* url, const std::string& token, DWORD& statusCode) {
+    statusCode = 0;
+    HINTERNET hInternet = InternetOpenA("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.9200 Chrome/134.0.6998.205 Electron/35.3.0 Safari/537.36", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
+    if (!hInternet) return "";
+    std::string headers = "Authorization: " + token + "\r\nAccept: application/json\r\n";
+    HINTERNET hConnect = InternetOpenUrlA(hInternet, url, headers.c_str(), (DWORD)headers.size(), INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE | INTERNET_FLAG_NO_COOKIES, 0);
+    if (!hConnect) { InternetCloseHandle(hInternet); return ""; }
+
+    DWORD len = sizeof(statusCode);
+    HttpQueryInfoA(hConnect, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &statusCode, &len, NULL);
+
+    std::string response;
+    char buffer[4096];
+    DWORD bytesRead = 0;
+    while (InternetReadFile(hConnect, buffer, sizeof(buffer), &bytesRead) && bytesRead > 0) {
+        response.append(buffer, bytesRead);
+    }
+    InternetCloseHandle(hConnect);
+    InternetCloseHandle(hInternet);
+    return response;
+}
+
+std::string UtcNowIso() {
+    time_t now = time(nullptr);
+    tm utc;
+    gmtime_s(&utc, &now);
+    char buf[32];
+    strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", &utc);
+    return buf;
+}
+
+bool IsDesktopQuest(const QuestInfo& quest) {
+    return quest.taskType == "PLAY_ON_DESKTOP" || quest.taskType == "STREAM_ON_DESKTOP";
+}
+
+std::string QuestTaskLabel(const std::string& taskType) {
+    if (taskType == "PLAY_ON_DESKTOP") return "Play";
+    if (taskType == "STREAM_ON_DESKTOP") return "Stream in VC";
+    if (taskType.find("WATCH_VIDEO") != std::string::npos) return "Video (not supported)";
+    if (taskType == "PLAY_ACTIVITY") return "Activity (not supported)";
+    return taskType.empty() ? "Unknown task" : taskType;
+}
+
+// Returns the active (not expired, not completed) quests of the account and links each one to its game in the detectables db.
+std::vector<QuestInfo> FetchActiveQuests(const std::string& token, const std::vector<GameInfo>& db, std::string& error) {
+    std::vector<QuestInfo> quests;
+    error.clear();
+
+    DWORD status = 0;
+    std::string body = DiscordApiGet(QUESTS_URL, token, status);
+    if (status == 401) { error = "Invalid Discord token (401)."; return quests; }
+    if (status != 200 || body.empty()) {
+        error = status == 0 ? "Can't reach Discord." : "Discord API error (HTTP " + std::to_string(status) + ").";
+        return quests;
+    }
+
+    static const char* taskOrder[] = { "PLAY_ON_DESKTOP", "STREAM_ON_DESKTOP", "PLAY_ACTIVITY", "WATCH_VIDEO", "WATCH_VIDEO_ON_MOBILE" };
+    std::string nowIso = UtcNowIso();
+
+    try {
+        json data = json::parse(body);
+        json list = data.is_array() ? data : (data.contains("quests") ? data["quests"] : json::array());
+        if (!list.is_array()) list = json::array();
+
+        for (auto& q : list) {
+            if (!q.contains("config") || !q["config"].is_object()) continue;
+            const json& cfg = q["config"];
+
+            std::string expiresAt = JsonStr(cfg, "expires_at");
+            if (!expiresAt.empty() && expiresAt.substr(0, 19) < nowIso) continue;
+
+            QuestInfo quest;
+            quest.id = JsonStr(q, "id");
+            if (cfg.contains("application") && cfg["application"].is_object()) {
+                quest.applicationId = JsonStr(cfg["application"], "id");
+                quest.gameName = JsonStr(cfg["application"], "name");
+            }
+            if (cfg.contains("messages") && cfg["messages"].is_object()) {
+                quest.questName = JsonStr(cfg["messages"], "quest_name");
+                std::string gameTitle = JsonStr(cfg["messages"], "game_title");
+                if (!gameTitle.empty()) quest.gameName = gameTitle;
+            }
+            if (quest.gameName.empty()) quest.gameName = quest.questName.empty() ? "Unknown game" : quest.questName;
+
+            const json* tasks = nullptr;
+            for (const char* key : { "task_config_v2", "task_config" }) {
+                if (cfg.contains(key) && cfg[key].is_object() && cfg[key].contains("tasks") && cfg[key]["tasks"].is_object()) {
+                    tasks = &cfg[key]["tasks"];
+                    break;
+                }
+            }
+            if (tasks) {
+                for (const char* t : taskOrder) {
+                    if (tasks->contains(t)) { quest.taskType = t; break; }
+                }
+                if (quest.taskType.empty() && !tasks->empty()) quest.taskType = tasks->begin().key();
+                if (!quest.taskType.empty()) {
+                    const json& task = (*tasks)[quest.taskType];
+                    if (task.is_object() && task.contains("target") && task["target"].is_number()) quest.targetSeconds = (int)task["target"].get<double>();
+                }
+            }
+
+            if (q.contains("user_status") && q["user_status"].is_object()) {
+                const json& us = q["user_status"];
+                if (!JsonStr(us, "completed_at").empty()) continue;
+                quest.enrolled = !JsonStr(us, "enrolled_at").empty();
+                if (us.contains("progress") && us["progress"].is_object() && us["progress"].contains(quest.taskType)) {
+                    const json& p = us["progress"][quest.taskType];
+                    if (p.is_object() && p.contains("value") && p["value"].is_number()) quest.progressSeconds = (int)p["value"].get<double>();
+                }
+            }
+
+            for (size_t i = 0; i < db.size(); ++i) {
+                if (!quest.applicationId.empty() && db[i].id == quest.applicationId) { quest.gameIndex = (int)i; break; }
+            }
+            if (quest.gameIndex < 0) {
+                std::string wanted = ToLower(quest.gameName);
+                for (size_t i = 0; i < db.size(); ++i) {
+                    if (ToLower(db[i].name) == wanted) { quest.gameIndex = (int)i; break; }
+                }
+            }
+
+            quests.push_back(quest);
+        }
+    }
+    catch (...) { error = "Can't parse Discord quests response."; }
+
+    std::stable_sort(quests.begin(), quests.end(), [](const QuestInfo& a, const QuestInfo& b) {
+        bool aLaunchable = IsDesktopQuest(a) && a.gameIndex >= 0;
+        bool bLaunchable = IsDesktopQuest(b) && b.gameIndex >= 0;
+        return aLaunchable && !bLaunchable;
+    });
+    return quests;
+}
+
+std::string FitText(const std::string& text, float maxWidth) {
+    if (ImGui::CalcTextSize(text.c_str()).x <= maxWidth) return text;
+    std::string s = text;
+    while (!s.empty() && ImGui::CalcTextSize((s + "...").c_str()).x > maxWidth) {
+        s.pop_back();
+        while (!s.empty() && ((unsigned char)s.back() & 0xC0) == 0x80) s.pop_back();
+    }
+    return s + "...";
+}
+
 void TextCentered(std::string text) {
     auto windowWidth = ImGui::GetContentRegionAvail().x;
     auto windowHeight = ImGui::GetContentRegionAvail().y;
@@ -373,6 +589,9 @@ void SetupKayzeStyle() {
     colors[ImGuiCol_ButtonHovered] = ImVec4(0.06f, 0.72f, 0.83f, 0.8f);
     colors[ImGuiCol_ButtonActive] = ImVec4(0.06f, 0.72f, 0.83f, 1.0f);
     colors[ImGuiCol_Header] = ImVec4(0.11f, 0.50f, 0.87f, 0.5f); colors[ImGuiCol_HeaderHovered] = colCyan;
+    colors[ImGuiCol_Tab] = colBoxBg; colors[ImGuiCol_TabHovered] = ImVec4(0.06f, 0.72f, 0.83f, 0.8f);
+    colors[ImGuiCol_TabSelected] = ImVec4(0.11f, 0.50f, 0.87f, 0.6f); colors[ImGuiCol_TabSelectedOverline] = colCyan;
+    colors[ImGuiCol_TabDimmed] = colBoxBg; colors[ImGuiCol_TabDimmedSelected] = ImVec4(0.11f, 0.50f, 0.87f, 0.4f);
 }
 
 static ID3D11Device* g_pd3dDevice = nullptr;
@@ -447,7 +666,14 @@ int main(int argc, char** argv) {
     auto db = FetchGameDatabase();
     std::vector<RunningGame> activeGames;
     static char searchBuf[128] = "";
+    static char tokenBuf[256] = "";
     GameInfo* currentSelectedGame = nullptr;
+
+    std::string discordToken = LoadDiscordToken();
+    std::string questError;
+    std::vector<QuestInfo> quests;
+    bool showTokenInput = discordToken.empty();
+    if (!discordToken.empty()) quests = FetchActiveQuests(discordToken, db, questError);
     bool done = false;
 
     while (!done) {
@@ -510,37 +736,155 @@ int main(int argc, char** argv) {
 
         ImGui::Spacing(); ImGui::Spacing();
 
-        ImGui::PushFont(fontRegular); ImGui::SetCursorPosX(30);
-        ImGui::PushItemWidth(winWidth - 60);
-        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10, 10));
-        ImGui::InputTextWithHint("##search", "Search game...", searchBuf, IM_ARRAYSIZE(searchBuf));
-        ImGui::PopStyleVar(); ImGui::PopItemWidth(); ImGui::PopFont(); ImGui::Spacing();
+        const float tabContentHeight = 264.0f;
+        ImGui::PushFont(fontBold);
+        if (ImGui::BeginTabBar("MainTabs")) {
+            if (ImGui::BeginTabItem("ACTIVE QUESTS")) {
+                ImGui::PopFont();
+                float tabStartY = ImGui::GetCursorPosY();
 
-        ImGui::PushFont(fontBold); ImGui::TextColored(ImVec4(1, 1, 1, 0.8f), "Search Results:"); ImGui::PopFont();
+                ImGui::PushFont(fontBold); ImGui::AlignTextToFramePadding();
+                ImGui::TextColored(ImVec4(1, 1, 1, 0.8f), "Your Discord quests:");
+                float smallW = 90.0f;
+                ImGui::SameLine(ImGui::GetWindowWidth() - smallW * 2 - style.ItemSpacing.x - 15.0f);
+                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1, 1, 1, 0.15f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(1, 1, 1, 0.25f));
+                ImGui::BeginDisabled(discordToken.empty());
+                if (ImGui::Button("REFRESH", ImVec2(smallW, 0))) quests = FetchActiveQuests(discordToken, db, questError);
+                ImGui::EndDisabled();
+                ImGui::SameLine();
+                if (ImGui::Button("TOKEN", ImVec2(smallW, 0))) showTokenInput = !showTokenInput;
+                ImGui::PopStyleColor(2); ImGui::PopFont();
 
-        ImGui::BeginChild("ResultsBox", ImVec2(0, 180), true);
-        std::string searchQ = ToLower(searchBuf);
-
-        if (searchQ.length() > 0) {
-            bool found = false;
-            for (auto& game : db) {
-                if (ToLower(game.name).find(searchQ) != std::string::npos) {
-                    found = true;
-                    ImGui::BeginChild(game.name.c_str(), ImVec2(0, 55), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-                    float textH = ImGui::GetTextLineHeight();
-                    ImGui::SetCursorPosY((55.0f - textH) * 0.5f); ImGui::SetCursorPosX(15.0f);
-                    ImGui::PushFont(fontBold); ImGui::Text("%s", game.name.c_str()); ImGui::PopFont();
-                    float btnH = 30.0f; float btnW = 90.0f;
-                    ImGui::SetCursorPosY((55.0f - btnH) * 0.5f); ImGui::SetCursorPosX(ImGui::GetWindowWidth() - btnW - 15.0f);
+                float questBoxHeight = tabContentHeight - (ImGui::GetCursorPosY() - tabStartY);
+                ImGui::BeginChild("QuestsBox", ImVec2(0, questBoxHeight), true);
+                if (showTokenInput || discordToken.empty()) {
+                    ImGui::PushFont(fontRegular);
+                    ImGui::PushStyleColor(ImGuiCol_Text, colTextGrey);
+                    ImGui::TextWrapped("Paste your Discord token to load your active quests automatically. It is stored encrypted (Windows DPAPI) on this PC and is sent only to discord.com. Never share it with anyone.");
+                    ImGui::PopStyleColor();
+                    float loadW = 90.0f;
+                    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - loadW - style.ItemSpacing.x);
+                    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10, 8));
+                    ImGui::InputTextWithHint("##token", "Discord token...", tokenBuf, IM_ARRAYSIZE(tokenBuf), ImGuiInputTextFlags_Password);
+                    ImGui::PopStyleVar(); ImGui::PopItemWidth(); ImGui::PopFont();
+                    ImGui::SameLine();
                     ImGui::PushFont(fontBold);
-                    if (ImGui::Button("SELECT", ImVec2(btnW, btnH))) currentSelectedGame = &game;
-                    ImGui::PopFont(); ImGui::EndChild();
+                    if (ImGui::Button("LOAD", ImVec2(loadW, ImGui::GetFrameHeight()))) {
+                        std::string newToken = TrimToken(tokenBuf);
+                        if (!newToken.empty()) {
+                            quests = FetchActiveQuests(newToken, db, questError);
+                            if (questError.empty()) {
+                                discordToken = newToken;
+                                SaveDiscordToken(discordToken);
+                                showTokenInput = false;
+                            }
+                        }
+                        SecureZeroMemory(tokenBuf, sizeof(tokenBuf));
+                    }
+                    if (!discordToken.empty()) {
+                        ImGui::PushStyleColor(ImGuiCol_Button, colBtnStop);
+                        if (ImGui::Button("FORGET SAVED TOKEN", ImVec2(ImGui::GetContentRegionAvail().x, 0))) {
+                            ForgetDiscordToken(); discordToken.clear(); quests.clear(); questError.clear();
+                        }
+                        ImGui::PopStyleColor();
+                    }
+                    ImGui::PopFont();
+                    if (!questError.empty()) ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "%s", questError.c_str());
                 }
+                else if (!questError.empty()) { TextCentered(questError); }
+                else if (quests.empty()) { TextCentered("No active quests right now."); }
+                else {
+                    for (auto& quest : quests) {
+                        const float rowH = 62.0f;
+                        GameInfo* questGame = quest.gameIndex >= 0 ? &db[quest.gameIndex] : nullptr;
+                        bool launchable = questGame != nullptr && !questGame->executables.empty() && IsDesktopQuest(quest);
+
+                        ImGui::BeginChild(("quest_" + quest.id).c_str(), ImVec2(0, rowH), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+                        float btnH = 30.0f; float btnW = 80.0f;
+                        float textMaxW = ImGui::GetWindowWidth() - 15.0f - (launchable ? btnW * 2 + style.ItemSpacing.x + 25.0f : 15.0f);
+
+                        ImGui::SetCursorPos(ImVec2(15.0f, 8.0f));
+                        ImGui::PushFont(fontBold); ImGui::Text("%s", FitText(quest.gameName, textMaxW).c_str()); ImGui::PopFont();
+
+                        std::string details = QuestTaskLabel(quest.taskType);
+                        if (quest.targetSeconds > 0) details += "  " + std::to_string(quest.progressSeconds / 60) + "/" + std::to_string(quest.targetSeconds / 60) + " min";
+                        if (!quest.enrolled) details += "  (not accepted yet)";
+                        else if (questGame == nullptr) details += "  (game not detectable)";
+                        ImGui::SetCursorPos(ImVec2(15.0f, 33.0f));
+                        ImGui::PushFont(fontRegular); ImGui::TextColored(colTextGrey, "%s", FitText(details, textMaxW).c_str()); ImGui::PopFont();
+
+                        if (launchable) {
+                            std::vector<RunningGame>::iterator runningIt = activeGames.end();
+                            for (auto it = activeGames.begin(); it != activeGames.end(); ++it) {
+                                if (it->info.id == questGame->id && it->isRunning) { runningIt = it; break; }
+                            }
+                            ImGui::SetCursorPos(ImVec2(ImGui::GetWindowWidth() - btnW * 2 - style.ItemSpacing.x - 15.0f, (rowH - btnH) * 0.5f));
+                            ImGui::PushFont(fontBold);
+                            if (runningIt != activeGames.end()) {
+                                ImGui::PushStyleColor(ImGuiCol_Button, colBtnStop);
+                                if (ImGui::Button("STOP", ImVec2(btnW, btnH))) { StopGhostProcess(*runningIt); activeGames.erase(runningIt); }
+                                ImGui::PopStyleColor();
+                            }
+                            else {
+                                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.06f, 0.72f, 0.83f, 0.5f));
+                                if (ImGui::Button("START", ImVec2(btnW, btnH))) {
+                                    RunningGame rg; rg.info = *questGame;
+                                    if (StartGhostProcess(rg, questGame->executables[0], questGame->executablePaths[0])) activeGames.push_back(rg);
+                                    currentSelectedGame = questGame;
+                                }
+                                ImGui::PopStyleColor();
+                            }
+                            ImGui::SameLine();
+                            if (ImGui::Button("SELECT", ImVec2(btnW, btnH))) currentSelectedGame = questGame;
+                            ImGui::PopFont();
+                        }
+                        ImGui::EndChild();
+                    }
+                }
+                ImGui::EndChild();
+                ImGui::EndTabItem();
+                ImGui::PushFont(fontBold);
             }
-            if (!found) TextCentered("No results found.");
+            if (ImGui::BeginTabItem("SEARCH")) {
+                ImGui::PopFont();
+            ImGui::PushFont(fontRegular); ImGui::SetCursorPosX(30);
+            ImGui::PushItemWidth(winWidth - 60);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10, 10));
+            ImGui::InputTextWithHint("##search", "Search game...", searchBuf, IM_ARRAYSIZE(searchBuf));
+            ImGui::PopStyleVar(); ImGui::PopItemWidth(); ImGui::PopFont(); ImGui::Spacing();
+
+            ImGui::PushFont(fontBold); ImGui::TextColored(ImVec4(1, 1, 1, 0.8f), "Search Results:"); ImGui::PopFont();
+
+            ImGui::BeginChild("ResultsBox", ImVec2(0, 180), true);
+            std::string searchQ = ToLower(searchBuf);
+
+            if (searchQ.length() > 0) {
+                bool found = false;
+                for (auto& game : db) {
+                    if (ToLower(game.name).find(searchQ) != std::string::npos) {
+                        found = true;
+                        ImGui::BeginChild(game.name.c_str(), ImVec2(0, 55), true, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+                        float textH = ImGui::GetTextLineHeight();
+                        ImGui::SetCursorPosY((55.0f - textH) * 0.5f); ImGui::SetCursorPosX(15.0f);
+                        ImGui::PushFont(fontBold); ImGui::Text("%s", game.name.c_str()); ImGui::PopFont();
+                        float btnH = 30.0f; float btnW = 90.0f;
+                        ImGui::SetCursorPosY((55.0f - btnH) * 0.5f); ImGui::SetCursorPosX(ImGui::GetWindowWidth() - btnW - 15.0f);
+                        ImGui::PushFont(fontBold);
+                        if (ImGui::Button("SELECT", ImVec2(btnW, btnH))) currentSelectedGame = &game;
+                        ImGui::PopFont(); ImGui::EndChild();
+                    }
+                }
+                if (!found) TextCentered("No results found.");
+            }
+            else { TextCentered("Type a game name above..."); }
+            ImGui::EndChild();
+                ImGui::EndTabItem();
+                ImGui::PushFont(fontBold);
+            }
+            ImGui::EndTabBar();
         }
-        else { TextCentered("Type a game name above..."); }
-        ImGui::EndChild();
+        ImGui::PopFont();
 
         ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
 
