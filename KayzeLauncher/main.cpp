@@ -42,7 +42,7 @@ const char* QUESTS_URL = "https://discord.com/api/v9/quests/@me";
 const char* APPS_URL = "https://discord.com/api/v9/applications/public?application_ids=";
 const char* TOKEN_FILENAME = "discord_token.dat";
 
-const std::string CURRENT_VERSION = "1.0.5";
+const std::string CURRENT_VERSION = "1.1.0";
 
 std::string GetGitHubAPIResponse(const char* url) {
     HINTERNET hInternet = InternetOpenA("KayzeLauncher_Updater/1.0", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
@@ -62,7 +62,7 @@ std::string GetGitHubAPIResponse(const char* url) {
 }
 
 void CheckForUpdates() {
-    std::string apiResponse = GetGitHubAPIResponse("https://api.github.com/repos/kayzedevx0/Discord-Quest-Completer/releases/latest");
+    std::string apiResponse = GetGitHubAPIResponse("https://api.github.com/repos/krazzer00/Discord-Quest-Completer/releases/latest");
     if (apiResponse.empty()) return;
 
     try {
